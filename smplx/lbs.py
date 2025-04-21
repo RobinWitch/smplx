@@ -332,8 +332,9 @@ def lbs_joint(
 
     v_posed = pose_offsets + v_shaped
     # 4. Get the global joint location
-    J_transformed, A = batch_rigid_transform(rot_mats, J, parents, dtype=dtype)
 
+    J_transformed, A = my_batch_rigid_transform(rot_mats, J, parents)
+        
 
     return J_transformed
 
@@ -429,7 +430,7 @@ def transform_mat(R: Tensor, t: Tensor) -> Tensor:
     '''
     # No padding left or right, only add an extra row
     return torch.cat([F.pad(R, [0, 0, 0, 1]),
-                      F.pad(t, [0, 0, 0, 1], value=1)], dim=2)
+                      F.pad(t, [0, 0, 0, 1], value=1.0)], dim=2)
 
 
 def batch_rigid_transform(
@@ -487,5 +488,54 @@ def batch_rigid_transform(
 
     rel_transforms = transforms - F.pad(
         torch.matmul(transforms, joints_homogen), [3, 0, 0, 0, 0, 0, 0, 0])
+
+    return posed_joints, rel_transforms
+
+def my_batch_rigid_transform(
+    rot_mats: torch.Tensor,
+    joints: torch.Tensor,
+    parents: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Batch rigid transform for a kinematic chain (e.g. skeleton).
+    Args:
+        rot_mats: (B, N, 3, 3) - rotation matrices
+        joints: (B, N, 3) - joint locations
+        parents: (N,) - parent indices for each joint
+    Returns:
+        posed_joints: (B, N, 3) - transformed joint locations
+        rel_transforms: (B, N, 4, 4) - transforms relative to root
+    """
+    B, N = joints.shape[:2]
+    joints_unsq = joints.unsqueeze(-1)  # (B, N, 3, 1)
+
+    rel_joints = joints_unsq.clone()
+    # parents[1:] shape: (N-1,)
+    # Gather parent joints for all batches
+    rel_joints[:, 1:] -= torch.gather(joints_unsq, 1, parents[1:].view(1, -1, 1, 1).expand(B, -1, 3, 1))
+
+    transforms_mat = transform_mat(
+        rot_mats.reshape(-1, 3, 3),
+        rel_joints.reshape(-1, 3, 1)
+    ).reshape(B, N, 4, 4)
+    parents_list = [-1,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  9,  9, 12, 13, 14,
+        16, 17, 18, 19, 15, 15, 15, 20, 25, 26, 20, 28, 29, 20, 31, 32, 20, 34,
+        35, 20, 37, 38, 21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52,
+        53]
+    transform_chain = [transforms_mat[:, 0]]
+    for i in range(1, N):
+        parent = parents_list[i]
+        prev = transform_chain[parent]
+        curr = torch.matmul(prev, transforms_mat[:, i])
+        transform_chain.append(curr)
+
+    transforms = torch.stack(transform_chain, dim=1)  # (B, N, 4, 4)
+    posed_joints = transforms[:, :, :3, 3]
+
+    joints_homogen = F.pad(joints_unsq, [0, 0, 0, 1])  # (B, N, 4, 1)
+
+    rel_transforms = transforms - F.pad(
+        torch.matmul(transforms, joints_homogen), [3, 0, 0, 0, 0, 0, 0, 0]
+    )
 
     return posed_joints, rel_transforms
